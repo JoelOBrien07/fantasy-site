@@ -11,6 +11,7 @@ If the AI call fails, the previous report is kept.
 """
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -65,27 +66,47 @@ def post_json(url, body, headers=None):
         return json.loads(r.read())
 
 
-def pick_gemini_model(key):
-    """Newest non-lite Flash model this key can use (falls back to Flash-Lite)."""
+def gemini_models(key):
+    """Usable Flash models, best first (newest non-lite, then lite), for fallback."""
     with urllib.request.urlopen(f"{GEMINI}/models?key={key}&pageSize=200", timeout=30) as r:
         models = [m["name"].removeprefix("models/") for m in json.loads(r.read()).get("models", [])
                   if "generateContent" in m.get("supportedGenerationMethods", [])]
     flash = [m for m in models if "flash" in m and not any(x in m for x in ("image", "tts", "live", "audio", "thinking"))]
-    flash.sort(key=lambda m: ("preview" in m or "exp" in m, "lite" in m, [-int(x) for x in m.replace("-", ".").split(".") if x.isdigit()]))
+    flash.sort(key=lambda m: ("preview" in m or "exp" in m, "lite" in m, "latest" in m,
+                              [-int(x) for x in m.replace("-", ".").split(".") if x.isdigit()]))
     if not flash:
         raise RuntimeError(f"No Flash model available. Models: {models}")
-    return flash[0]
+    return flash
 
 
 def ask_gemini(system, user):
     key = os.environ["GEMINI_API_KEY"]
-    model = os.environ.get("GEMINI_MODEL") or pick_gemini_model(key)
-    print("Gemini model:", model)
+    candidates = gemini_models(key)
+    if os.environ.get("GEMINI_MODEL"):
+        candidates = [os.environ["GEMINI_MODEL"]] + [m for m in candidates if m != os.environ["GEMINI_MODEL"]]
     body = {"systemInstruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": user}]}],
             "generationConfig": {"responseMimeType": "application/json"}}
-    res = post_json(f"{GEMINI}/models/{model}:generateContent", body, {"x-goog-api-key": key})
-    return "".join(p.get("text", "") for p in res["candidates"][0]["content"]["parts"])
+    last_err = None
+    for model in candidates[:4]:
+        for attempt, wait in enumerate((0, 10, 30)):
+            time.sleep(wait)
+            try:
+                print(f"Gemini model: {model} (try {attempt + 1})")
+                res = post_json(f"{GEMINI}/models/{model}:generateContent", body, {"x-goog-api-key": key})
+                parts = res["candidates"][0]["content"]["parts"]
+                return "".join(p.get("text", "") for p in parts if not p.get("thought"))
+            except urllib.error.HTTPError as err:
+                last_err = f"{err.code} {err.read().decode()[:300]}"
+                print("  failed:", last_err)
+                if err.code in (500, 503):
+                    continue          # busy: wait and retry same model
+                break                 # 429 quota / 404 etc: try the next model
+            except (KeyError, IndexError) as err:
+                last_err = f"empty response {err!r}"
+                print("  failed:", last_err)
+                break
+    raise RuntimeError(f"All Gemini models failed. Last error: {last_err}")
 
 
 def ask_claude(system, user):
