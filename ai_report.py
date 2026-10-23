@@ -60,9 +60,9 @@ def build_prompt(league):
     return system, user
 
 
-def post_json(url, body, headers=None):
+def post_json(url, body, headers=None, timeout=120):
     req = urllib.request.Request(url, json.dumps(body).encode(), {"Content-Type": "application/json", **(headers or {})})
-    with urllib.request.urlopen(req, timeout=120) as r:
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read())
 
 
@@ -88,12 +88,19 @@ def ask_gemini(system, user):
             "contents": [{"role": "user", "parts": [{"text": user}]}],
             "generationConfig": {"responseMimeType": "application/json"}}
     last_err = None
-    for model in candidates[:4]:
-        for attempt, wait in enumerate((0, 10, 30)):
+    deadline = time.monotonic() + float(os.environ.get("AI_MAX_SECONDS") or 180)  # whole AI step budget
+    for model in candidates[:3]:
+        for attempt, wait in enumerate((0, 5)):
+            left = deadline - time.monotonic() - wait
+            if left < 20:
+                raise RuntimeError(f"Out of time for AI this run. Last error: {last_err}")
             time.sleep(wait)
             try:
-                print(f"Gemini model: {model} (try {attempt + 1})")
-                res = post_json(f"{GEMINI}/models/{model}:generateContent", body, {"x-goog-api-key": key})
+                print(f"Gemini model: {model} (try {attempt + 1})", flush=True)
+                t0 = time.monotonic()
+                res = post_json(f"{GEMINI}/models/{model}:generateContent", body, {"x-goog-api-key": key},
+                                timeout=min(90, left))
+                print(f"  ok in {time.monotonic() - t0:.0f}s")
                 parts = res["candidates"][0]["content"]["parts"]
                 return "".join(p.get("text", "") for p in parts if not p.get("thought"))
             except urllib.error.HTTPError as err:
@@ -102,6 +109,10 @@ def ask_gemini(system, user):
                 if err.code in (500, 503):
                     continue          # busy: wait and retry same model
                 break                 # 429 quota / 404 etc: try the next model
+            except (TimeoutError, urllib.error.URLError) as err:
+                last_err = f"timeout/network {err!r}"
+                print("  failed:", last_err)
+                break                 # slow model: try the next one
             except (KeyError, IndexError) as err:
                 last_err = f"empty response {err!r}"
                 print("  failed:", last_err)

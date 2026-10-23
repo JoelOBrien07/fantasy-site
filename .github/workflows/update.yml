@@ -18,6 +18,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -34,7 +35,7 @@ jobs:
         run: python fetch_data.py
 
       - name: Get last AI report from the live site
-        run: curl -fsSL "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/ai.json" -o data/ai.json || echo "No previous report"
+        run: curl -fsSL --max-time 20 "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/ai.json" -o data/ai.json || echo "No previous report"
 
       - name: AI analysis
         env:
@@ -43,6 +44,8 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           AI_EVERY_HOURS: "4"
           FORCE_AI: ${{ github.event_name == 'workflow_dispatch' }}
+        timeout-minutes: 5
+        continue-on-error: true
         run: python ai_report.py
 
       - run: python build_site.py
