@@ -35,8 +35,7 @@ def main():
         espn_s2=os.environ.get("ESPN_S2") or None,
         swid=os.environ.get("SWID") or None,
     )
-    my_name = os.environ.get("MY_TEAM", "Scottier Barney's").strip().lower()
-
+    my_name = (os.environ.get("MY_TEAM") or "Scottier Barney's").strip().lower()
     teams = []
     my_team = None
     for t in league.teams:
