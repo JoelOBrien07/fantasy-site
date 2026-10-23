@@ -6,7 +6,7 @@ A site that rebuilds itself every 4 hours: it pulls your ESPN league, asks Claud
 fetch_data.py   ESPN API  -> data/league.json
 ai_report.py    Claude    -> data/ai.json
 build_site.py   both      -> site/index.html
-.github/workflows/update.yml   runsss all three on a schedule and deploys
+.github/workflows/update.yml   runs all three on a schedule and deploys
 ```
 
 ## Setup (~20 min)
@@ -18,13 +18,13 @@ build_site.py   both      -> site/index.html
 3. **Get your ESPN cookies** (only needed if the league is private):
    on a laptop, log into espn.com, open DevTools (F12) → Application → Cookies → `https://www.espn.com`, and copy the values of `espn_s2` and `SWID` (keep the `{}` braces on SWID).
 
-4. **Get a Claude API key** from console.anthropic.com → API Keys. It's billed per use. Each run is one request, so 6 runs a day is light, but check the pricing page. Skip this and the site still works, just without the AI parts.
+4. **Get a free Gemini API key** from aistudio.google.com → Get API key. The free tier is enough because the AI only runs every 4 hours (or when you click Run workflow). Google may use free-tier prompts to improve its products, so it only ever sees your league data. Skip this and the site still works, just without the AI parts. (A Claude key in `ANTHROPIC_API_KEY` works too, as a paid option.)
 
 5. **Add secrets** in the repo: Settings → Secrets and variables → Actions → *New repository secret*:
    - `LEAGUE_ID`
    - `ESPN_S2`
    - `SWID`
-   - `ANTHROPIC_API_KEY`
+   - `GEMINI_API_KEY`
 
    Optional: under the *Variables* tab, add `MY_TEAM` if your team name ever changes (default is `Scottier Barney's`).
 
@@ -44,7 +44,8 @@ open site/index.html
 ## Tweaks
 
 - **How often:** change the `cron` line in `update.yml` (it's in UTC).
-- **Model:** set a `CLAUDE_MODEL` env var in the AI step (default `claude-sonnet-5-5`).
+- **Model:** it auto-picks the newest Gemini Flash model. To force one, add a `GEMINI_MODEL` repository variable.
+- **How often the AI runs:** `AI_EVERY_HOURS` in `update.yml`. Scores still refresh every 15 min during games.
 - **What the AI knows:** league rules and scoring live in `LEAGUE_RULES` in `ai_report.py`. Update it if the settings change.
 - **Season:** `SEASON` defaults to `2027` (ESPN numbers seasons by the year they end).
 

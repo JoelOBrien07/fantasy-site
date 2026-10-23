@@ -95,6 +95,7 @@ def build():
 <main><div class="top">{"".join(top)}</div><div class="col">{"".join(left)}</div><div class="col">{"".join(right)}</div></main><footer>Data from ESPN · analysis by Claude</footer></body></html>'''
     SITE.mkdir(exist_ok=True)
     (SITE / "index.html").write_text(html)
+    (SITE / "ai.json").write_text(json.dumps(ai))  # next run reuses this instead of calling the AI again
     print("Built", SITE / "index.html")
 
 

@@ -1,15 +1,23 @@
-"""Ask Claude to analyse the league data and save the advice to data/ai.json.
+"""Get AI advice on the league data and save it to data/ai.json.
 
-Needs env var ANTHROPIC_API_KEY. Optional: CLAUDE_MODEL (default claude-sonnet-5-5).
-If there's no key, it writes a placeholder so the site still builds.
+Providers (first key found wins):
+  GEMINI_API_KEY     -> Google Gemini free tier (GEMINI_MODEL optional; auto-picks a Flash model if unset/unavailable)
+  ANTHROPIC_API_KEY  -> Claude (CLAUDE_MODEL optional)
+No key -> placeholder, site still builds.
+
+The AI only runs every AI_EVERY_HOURS (default 4) to stay inside free limits; between runs the
+previous report (downloaded from the live site by the workflow) is reused. FORCE_AI=true runs it anyway.
+If the AI call fails, the previous report is kept.
 """
 import json
 import os
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
-import anthropic
-
 DATA = Path(__file__).parent / "data"
+GEMINI = "https://generativelanguage.googleapis.com/v1beta"
 
 LEAGUE_RULES = """
 League: 8-team ESPN head-to-head POINTS league, 20 weekly matchups, top 4 make playoffs. Daily lineups.
@@ -33,16 +41,7 @@ SCHEMA_HINT = """Reply with ONLY a JSON object, no markdown, in exactly this sha
 }"""
 
 
-def main():
-    league = json.loads((DATA / "league.json").read_text())
-    out = DATA / "ai.json"
-
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        out.write_text(json.dumps({"headline": "AI analysis is off — add an ANTHROPIC_API_KEY secret to turn it on."}))
-        print("No API key, wrote placeholder")
-        return
-
-    # Keep the prompt lean: other teams' rosters without the noise
+def build_prompt(league):
     slim = {
         "my_team": league["my_team"],
         "matchup": league["matchup"],
@@ -54,22 +53,87 @@ def main():
         "top_free_agents": league["free_agents"][:25],
         "recent_activity": league["activity"],
     }
+    system = ("You are a sharp fantasy basketball analyst. Be specific, use the scoring rules, "
+              "and keep reasons short and casual.\n" + LEAGUE_RULES)
+    user = (f"My team is {league['my_team']['name']}. League data:\n" + json.dumps(slim) + "\n\n" + SCHEMA_HINT)
+    return system, user
 
-    client = anthropic.Anthropic()
-    msg = client.messages.create(
-        model=os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5"),
-        max_tokens=3000,
-        system="You are a sharp fantasy basketball analyst. Be specific, use the scoring rules, and keep reasons short and casual.\n"
-               + LEAGUE_RULES,
-        messages=[{"role": "user", "content": f"My team is {league['my_team']['name']}. League data:\n"
-                   + json.dumps(slim) + "\n\n" + SCHEMA_HINT}],
-    )
-    text = "".join(b.text for b in msg.content if b.type == "text").strip()
-    text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+
+def post_json(url, body, headers=None):
+    req = urllib.request.Request(url, json.dumps(body).encode(), {"Content-Type": "application/json", **(headers or {})})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        return json.loads(r.read())
+
+
+def pick_gemini_model(key):
+    """Newest non-lite Flash model this key can use (falls back to Flash-Lite)."""
+    with urllib.request.urlopen(f"{GEMINI}/models?key={key}&pageSize=200", timeout=30) as r:
+        models = [m["name"].removeprefix("models/") for m in json.loads(r.read()).get("models", [])
+                  if "generateContent" in m.get("supportedGenerationMethods", [])]
+    flash = [m for m in models if "flash" in m and not any(x in m for x in ("image", "tts", "live", "audio", "thinking"))]
+    flash.sort(key=lambda m: ("preview" in m or "exp" in m, "lite" in m, [-int(x) for x in m.replace("-", ".").split(".") if x.isdigit()]))
+    if not flash:
+        raise RuntimeError(f"No Flash model available. Models: {models}")
+    return flash[0]
+
+
+def ask_gemini(system, user):
+    key = os.environ["GEMINI_API_KEY"]
+    model = os.environ.get("GEMINI_MODEL") or pick_gemini_model(key)
+    print("Gemini model:", model)
+    body = {"systemInstruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": [{"text": user}]}],
+            "generationConfig": {"responseMimeType": "application/json"}}
+    res = post_json(f"{GEMINI}/models/{model}:generateContent", body, {"x-goog-api-key": key})
+    return "".join(p.get("text", "") for p in res["candidates"][0]["content"]["parts"])
+
+
+def ask_claude(system, user):
+    import anthropic
+    msg = anthropic.Anthropic().messages.create(
+        model=os.environ.get("CLAUDE_MODEL") or "claude-sonnet-5-5", max_tokens=3000,
+        system=system, messages=[{"role": "user", "content": user}])
+    return "".join(b.text for b in msg.content if b.type == "text")
+
+
+def main():
+    league = json.loads((DATA / "league.json").read_text())
+    out = DATA / "ai.json"
     try:
+        previous = json.loads(out.read_text())
+    except (OSError, json.JSONDecodeError):
+        previous = None
+
+    if os.environ.get("GEMINI_API_KEY"):
+        ask = ask_gemini
+    elif os.environ.get("ANTHROPIC_API_KEY"):
+        ask = ask_claude
+    else:
+        out.write_text(json.dumps({"headline": "AI analysis is off — add a GEMINI_API_KEY secret to turn it on."}))
+        print("No AI key, wrote placeholder")
+        return
+
+    # Reuse the last report if it's recent enough (keeps us inside free-tier limits)
+    every = float(os.environ.get("AI_EVERY_HOURS") or 4)
+    if previous and previous.get("generated") and os.environ.get("FORCE_AI") != "true":
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(previous["generated"])).total_seconds() / 3600
+        if age < every - 0.25:
+            print(f"Last AI report is {age:.1f}h old, reusing it")
+            return
+
+    try:
+        system, user = build_prompt(league)
+        text = ask(system, user).strip()
+        text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         report = json.loads(text)
-    except json.JSONDecodeError:
-        report = {"headline": "AI replied in an unexpected format this run.", "raw": text}
+        report["generated"] = datetime.now(timezone.utc).isoformat()
+    except urllib.error.HTTPError as err:
+        print("AI request failed:", err.code, err.read().decode()[:500])
+        report = previous or {"headline": "AI is unavailable right now — it'll retry next run."}
+    except Exception as err:
+        print("AI step failed:", repr(err))
+        report = previous or {"headline": "AI is unavailable right now — it'll retry next run."}
+
     out.write_text(json.dumps(report, indent=2))
     print("Saved", out)
 
